@@ -1,0 +1,990 @@
+---
+title: "Analyse exploratoire des données - Devoir III"
+author: "Duc Duong Nguyen & Mohamed-Amine Bousahih"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    includes:
+      in_header: header.tex
+  html_notebook:
+    code_folding: none
+    number_sections: yes
+    toc: yes
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+  word_document:
+    toc: yes
+subtitle: Quotients de mortalité,Tables de mortalité,ACP,ACC,SVD,Modèle de Lee-Carter.
+params:
+  country: France
+  country_code: fr_t
+  dirpath: ../LIFE_TABLES/lt_
+  timecourse: 1945:2015
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{cat, engine.opts = list(file = "header.tex")}
+\renewcommand{\linethickness}{0.05em}
+```
+---
+
+# Introduction 
+
+L'étude de la structure et de l'évolution d'une population dans une région est appelée démographie. La démographie est l'étude du nombre, de la répartition, du territoire et de la structure de la population et de ses changements, dans laquelle les changements se produisent en raison de la naissance (fertilité), du décès (mortalité) et de la migration. 
+
+L'objet principal de ce travail de recherche est les quotients de mortalité. Un quotient de mortalité, d'après une définition de l'INED, est une "probabilité, pour les personnes survivantes à un âge, de décéder avant l'âge suivant".
+
+Le fil conducteur de ce travail de recherche sera une comparaison reposant sur ces quotients de mortalités entre les Etats-Unis et l'Espagne.
+
+Nous observerons l'évolution de ces quotients de mortalité à travers le temps, en fonction du sexe et pour des groupes d'âges précis. Ceci nous permettra de distinguer des tendances mondiales et voir si en fonction de l'âge, les quotients de mortalité partagent une forme commune. 
+
+Comme tout bon statisticien, nous utiliserons une ACP (Analyse en composante principale) et une ACC (Analyse correspondance canonique) pour explorer des relations pouvant exister entre des groupes de variables que nous essayerons d'identifier au sein de ces données. 
+
+A l'issue de cette phase d'exploration, nous chercherons à effectuer des prédictions de ces quotients de mortalité.
+Pour effectuer ces prédictions, de nombreuses méthodes ont été proposées pour décrire le comportement des quotients de mortalité en fonction de l'âge, du temps pour une région donnée. En particulier, nous présenterons un modèle mathématique étant largement reconnu et utilisé proposé par Lee et Carter deux américains, qui en 1992, ont mis en place une méthode afin d'ajuster et de prévoir les taux de mortalité humaine.  
+
+# Les données
+
+L'ensemble de données qui sera utilisé est la base de données sur la mortalité humaine (HMD, Human Mortality Database organization), qui fournit un accès gratuit aux données historiques de mortalité pour des pays européens : France, Grande-Bretagne -- enfaite l'Angleterre et le Pays de Galles -- , Italie, Pays-Bas, Espagne, Suède. Couvrant également les Etats-Unis. Le HMD est une importante collection de données détaillées, cohérentes et de haute qualité sur la mortalité humaine.
+
+Les tables de données sont téléchargés à partir de [https://www.mortality.org] (https://www.mortality.org).
+
+Nous chargeons les tables de mortalité pour une année donné, pour les femmes, les hommes et l’ensemble de la population pour les différents pays. Nous obtenons une table universelle construite en fusionnant ces tables de mortalité.
+
+
+```{r, echo=FALSE,eval=FALSE}
+# for debugging
+# params should be initialized from YAML header
+params<- list(
+    timecourse= 1945:2015,
+    dirpath= '../LIFE_TABLES/lt_',
+    country_code= 'fr_t',
+    country= 'France')
+```
+
+```{r, echo=FALSE}
+timecourse <- eval(rlang::parse_expr(params$timecourse))
+```
+
+```{r tidyverse, message=FALSE, warning=FALSE, echo=FALSE}
+pacman::p_load(tidyverse)
+pacman::p_load(plotly)
+pacman::p_load(foreach)
+pacman::p_load(iterators)
+pacman::p_load(DT)
+pacman::p_load(ade4)
+pacman::p_load(FactoMineR)
+pacman::p_load(factoextra)
+pacman::p_load(FactoInvestigate)
+pacman::p_load(ggfortify)
+old_theme <-theme_set(theme_dark(base_size=9,
+                                 base_family = "Helvetica"))
+knitr::opts_chunk$set(eval=TRUE,
+  echo=FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  autodep = TRUE,
+  tidy = FALSE)
+```
+
+
+```{r, echo=FALSE}
+country_code <- list(fr_t='FRATNP',
+                     fr_c='FRACNP',
+                     be='BEL',
+                     gb_t='GBRTENW',
+                     gb_c='GBRCENW',
+                     nl='NLD',
+                     it='ITA',
+                     swe='SWE',
+                     sp='ESP',
+                     us='USA')
+countries <- c('fr_t',  'gb_t',  'nl', 'it', 'sp', 'swe', 'us')
+country_names <- list(fr_t='France',     # total population
+                     fr_c='France',      # civilian population
+                     be='Belgium',
+                     gb_t='England & Wales',    # total population
+                     gb_c='England & Wales',    # civilian population
+                     nl='Netherlands',
+                     it='Italy',
+                     swe='Sweden',
+                     sp='Spain',
+                     us='USA')
+gender_names <- list('b'='Both',
+                     'f'='Female',
+                     'm'='Male')
+```
+
+```{r, echo=FALSE}
+fusion_data = function(data_f,data_m,country)
+{
+  data_f["Gender"] = "F"
+  data_m["Gender"] = "M"
+  data = rbind(data_f,data_m)
+  data["Country"] = country
+  return (data)
+}
+gender_code = list('b'='both',
+                  'f'='female',
+                  'm'='male')
+import_data = function(country,gender)
+{
+  file = paste("../LIFE_TABLES/lt_",gender_code[gender],"/",gender,"ltper_1x1/",country,".",gender,"ltper_1x1.txt",sep="")
+  data = readr::read_delim(file, delim = ' ', skip = 2)
+  return(data)
+}
+retype = function(data)
+{
+  names(data) <- stringr::str_replace_all(names(data), " ", "")
+  data %>%
+  dplyr::mutate_at(vars(Year,Age,lx,dx,Lx,Tx),.funs = list(~as.integer(.))) %>%
+  dplyr::mutate_at(vars(Country,Gender),.funs = list(~forcats::as_factor(.))) %>%
+  dplyr::mutate_at(vars(mx,qx,ax,ex),.funs = list(~as.double(.)))-> data
+  return(data)
+}
+universal_table = function()
+{
+  index = (2:length(countries))
+  data_f = import_data(country_code[countries[1]],'f')
+  data_m = import_data(country_code[countries[1]],'m')
+  data = fusion_data(data_f,data_m,country_names[countries[1]])
+  for (c in countries[index])
+  {
+    data_f = import_data(country_code[c],'f')
+    data_m = import_data(country_code[c],'m')
+    temp = fusion_data(data_f,data_m,country_names[c])
+    data = rbind(data,temp)
+  }
+  return(data)
+}
+df = universal_table()
+df = retype(df)
+df%>%tidyr::drop_na(Age)->df
+glimpse(df)
+```
+
+Pour mener à bien ce travail de recherche, nous utiliserons six colonnes de cette table universelle : Year, Age, mx , ex , Gender et Country.
+
+- mx représente un quotient de mortalité pour un âge x et une année t. Il se calcule en divisant les décès à un âge X par les survivants à un âge X.
+
+- ex représente l'espérance de vie.
+
+# Visualisations et réarrangement de nos données
+
+## Visualisations des quotients de mortalité en fonction de l'âge, des années, des pays.
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+p<- ggplot(mapping=aes(x=Age, y=mx, colour = Gender))+
+  geom_line(size = 0.5)+
+  xlab("Age") +
+  ylab("Quotients de mortalité") +
+  ggtitle("Quotients de mortalité", subtitle = "de l'Espagne et des États-Unis à tous les âges pour l'année 1948.") +
+  scale_x_continuous(breaks = seq(0,110,by=10))+
+  scale_y_log10()+
+  facet_grid(~ Country) +
+  theme_bw()
+(p%+%
+  dplyr::filter(df,Year == 1948,Country %in% c("Spain","USA")))
+```
+
+Ce graphique présente les taux centraux de mortalité par âge et par sexe pour l'Espagne et les États-Unis en $1948$.
+
+- On peut observer, à tous les âges, pour l’Espagne et les États-Unis, que le risque de mourir des hommes est plus élevé que celui des femmes. De plus, pour les âges entre $0$ et $50$ ans, le risque de mourir en Espagne est plus élevé que celui des États-Unis.
+
+- La plupart de ces décès surviennent immédiatement après la naissance. Pour l’Espagne, le risque annuel de mourir à la naissance est de $68$ enfants pour $10.000$ pour les filles et de $80$ enfants pour $10.000$ pour les garçons.Pour les États-Unis, le risque annuel de mourir à la naissance est de $30$ enfants pour $10.000$ pour les filles et de $40$ enfants pour $10.000$ pour les garçons.
+
+- De la naissance au premier anniversaire, la probabilité de mourir diminue fortement pour les deux sexes et les deux pays.
+
+-  Pour les deux sexes, à partir de $1$ ans, la probabilité de mourir en Espagne et aux États-Unis diminue progressivement, atteignant un risque minimum à l'âge de $10$ ans et/ou $11$ ans.
+
+- Le risque de mourir augmente fortement à l’adolescence.
+
+- L’excès de mortalité masculine est le plus élevé entre $20$ et $30$ ans, période au cours de laquelle le risque de mourir est de $1,6$ plus élevé chez les hommes que chez les femmes du même âge.
+
+- Peu importe le sexe, aux États-Unis, nous observons une croissance exponentielle qui continue de croître pour les aînés. Pour l’Espagne, les courbes sont en forme de "dent de scie" avec des pics de mortalité à des âges spécifiques : $65$ ans, $70$ ans, $80$ ans dépassant la mortalité des USA.
+
+- À partir de l’âge de $80+$, nous pensons que l’estimation exacte est compliquée notamment dû à des erreurs de recensement et, pour les personnes extrêmement âgées ($105$ et plus), par le faible nombre de personnes vivantes.
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+ratio <- function(data, reference_country="USA", reference_year=1948){
+  data%>%
+    dplyr::filter(Year == reference_year)->data
+  
+  dplyr::filter(data, Country == "Spain")%>%
+  dplyr::inner_join(y=data[data$Country==reference_country, c("Age", "mx","Gender")], by=c("Age","Gender"))
+}
+q <- ggplot(mapping = aes(x=Age, y=mx.x/mx.y, colour = Country)) +
+  geom_smooth(method="loess",
+              se=FALSE,
+              span=0.2,
+              size=.5) +
+  ggtitle("Ratios des quotients de mortalité", subtitle = "entre l'Espagne et les États-Unis en 1948")+
+  ylab("Ratio des quotients de mortalité, par rapport aux USA") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", size = 0.5)+
+  scale_y_continuous(breaks = seq(0,7,by=1))+
+  scale_x_continuous(breaks = seq(0,110,by=10))+
+  facet_wrap(~ Gender)+
+  theme_bw()
+(q %+%
+  ratio(df))
+```
+- Nous constatons qu'un écart de mortalité se creuse entre les deux pays à la naissance. En effet, en Espagne, le risque annuel de décès à la naissance pour les filles est $4.43$ supérieur à celui des États-Unis. Concernant les garçons, ce risque annuel de décès est supérieur à $3.97$ à celui des États-Unis.
+
+- De la naissance au 16ème anniversaire, ce ratio diminue fortement pour les deux sexes signifiant une baisse d'écart de mortalité entre les deux pays. Pour les garçons, ce ratio atteint un minimum local à $16$ ans signifiant que le risque annuel de décès à cet âge pour les garçons est $1.74$ supérieur à celui des États-Unis. Concernant les filles, le risque annuel de décès en ce point de minimum local est $2.61$ supérieur à celui des États-Unis.
+
+- Comme nous l'avons remarqué précédement, le risque de mourir augmente fortement à l’adolescence. Cela a pour conséquence que l'écart de mortalité entre les deux pays se creuse impliquant une augmentation des ratios des quotients de mortalité entre $16$ ans et $23$ ans.
+
+- Peu importe le sexe, à l'âge adulte (c'est à dire à partir de $23$ ans), nous observons une forte diminution des ratios des quotients de mortalité entre les deux pays atteignant un minimum globale à l'âge de $57$ ans. A cet âge, le risque annuel de décès pour les filles est $0.85$ supérieur à celui des États-Unis. Concernant les garçons, ce risque annuel de décès est supérieur à $0.84$ à celui des États-Unis.
+
+- A partir de $60$ ans, les ratios des quotients de mortalité se stabilisent nous montrant que le risque annuel de décès à ces âges élevés est très proche entre l'Espagne et les États-Unis.
+
+## Évolution des quotients de mortalité depuis la Seconde Guerre mondiale
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+after_ww_II = seq(1946,2016,by=10)
+p<-
+  ggplot(mapping = aes(x=Age, y=mx, colour = forcats::as_factor(Year)))+
+  geom_smooth(method="loess",
+              se=FALSE,
+              span=0.2,
+              size=.5) +
+  scale_y_log10()+
+  labs(colour="Year")+
+  xlab("Age") +
+  ylab("Quotients de mortalité") +
+  theme_bw()
+(p%+%
+  dplyr::filter(df, Country %in% c("Spain","USA"), Year %in% after_ww_II) +
+  facet_wrap(vars(Gender,Country))+
+  ggtitle("Evolution des quotients de mortalité depuis la Seconde Guerre mondiale."))
+```
+
+- Concernant le graphique ci-dessus, nous constatons que les quotients de mortalité des jeunes en 1946 est plus petit aux Etats-Unis par rapport à l'Espagne. Cela est certainement dû au fait que les États-Unis n’ont pas beaucoup souffert de pertes humaines pendant la Seconde Guerre mondiale, contrairement à l’Espagne.
+
+```{r}
+ratio_mortality_rates <- function(df,
+                                  reference_year=1946,
+                                  target_years=seq(1946, 2016, 10))
+{
+  dplyr::filter(df[c("Age","mx","Country","Gender","Year")], Year %in% target_years, Country %in% c("Spain","USA")) %>%
+  dplyr::inner_join(y=df[df$Year==reference_year, c("Age", "mx", "Gender","Country")], by=c("Age","Gender","Country"))->data
+  return (data);
+}
+ratio = ratio_mortality_rates(df)
+```
+
+```{r, echo = FALSE, results= "hide" ,fig.width=8, fig.height=4}
+p<- ggplot(mapping = aes(x=Age, y=mx.x/mx.y, colour = Year)) +
+  geom_smooth(method="loess",
+              se=FALSE,
+              span=0.2,
+              size=.5) +
+  scale_x_continuous(breaks = seq(0,110,by=10))+
+  ylab("Ratio des quotients de mortalité, par rapport à l'année 1946") +
+  ggtitle("Variation des quotients de mortalité", subtitle = "Entre l'Espagne et les États-Unis de 1946 à 2016")+
+  facet_wrap(vars(Country,Gender))+
+  theme_bw()
+p%+%
+  (ratio%>%
+    mutate(Year = as.factor(Year)))
+```
+
+- Ce graphique nous informe que, pour les deux pays, les quotients de mortalité diminuent au fil des années pour les âges <= $80$ ans.
+- En effet, en 1956 pour l’Espagne , le ratio est de $0.5$ à la naissance et celui-ci passe à $0.25$ en 1966. 
+- Nous constatons une diminution de la mortalité plus marqué en Espagne par rapport aux Etats-Unis notamment chez les hommes.
+- Nous observons que le risque de mortalité pour les personnes âgées (les femmes), notamment en Espagne est plus élevé par les années $1956$ à  $2016$ par rapport à l’année $1946$.
+
+## Tendances 
+
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+ages <- c(0, 1, 5)
+p <-ggplot(mapping=aes(x=Year, y=mx, linetype=forcats::as_factor(Age))) +
+  geom_smooth(method="loess",
+              se=FALSE,
+              span=0.2,
+              size=.5) +
+  scale_color_brewer() +
+  labs(linetype="Age") +
+  facet_wrap(vars(Gender,Country))+
+  ylab("Quotients de mortalité")+
+  theme_bw()
+(p%+%
+  filter(df, Age %in% ages, Country %in% c("Spain","USA"))+
+  ggtitle("Evolution des quotients de mortalité pour les nouveaux nés et les enfants."))
+```
+
+- Ce graphique nous informe que les taux de mortalité les plus élevés sont à la naissance quelque soit le sexe et la période donnée.
+- Les taux de mortalité à la naissance/infantile ont fortement diminué au cours du temps en Espagne et aux États-Unis. Les quotients de mortalité des âges $0,1,5$ sont très différents dans le siècle précédent, pourtant ils se rapprochent à partir de 2000.
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+ages <- c(15, 20, 40, 60)
+p%+%
+  filter(df, Age %in% ages, Country %in% c("Spain","USA"))+
+  ggtitle("Evolution des quotients de mortalité pour les adolescents et les adultes.")
+```
+
+- Ce graphique nous informe que les taux de mortalité les plus élevés sont aux âges les plus élevés (i.e $60$ ans) quelque soit le sexe et la période donnée.
+- Les taux de mortalité aux âges élevés ont diminué au cours du temps en Espagne et aux États-Unis. Signifiant que l'espérance de vie à la naissance pour ces âges élevés a augmentée durant les années $2000$.
+- Nous constatons que les taux de mortalité pour les adolescents âgés de $15$ ans est relativement constante à travers le temps.
+
+## Rearrangement des données
+
+Nous réarrangeons nos données en pivotant notre table universelle de départ par rapport à la colonne Age. Chaque ligne est identifiée par (Year,Gender,Country). Les colonnes correspondent aux âges et le contenu de chaque cellule est le log-quotient de mortalité à un âge donné pour une année, un pays et un sexe donné.
+
+```{r, echo = FALSE, results="markup"}
+df_pivot <- df %>%
+  select(Year, Age, Gender,Country, mx) %>%
+  tidyr::pivot_wider(names_from = "Age", values_from = "mx")
+df_pivot
+```
+
+
+```{r, echo = FALSE, results = "hide"}
+ex <- function(mx){
+  sum(cumprod(1 - mx))
+}
+df_pivot %>%
+  dplyr::select(Year, Gender, Country) -> df_ex
+df_ex["life_expectancy"]= apply(df_pivot[,-c(1,2,3)], MARGIN=1, FUN = ex)
+#compare to real ex
+df %>%
+  filter(Age==0) %>%
+  select(Year, Gender,Country,ex)
+df_ex
+```
+
+## Espérance de vie
+
+```{r, echo = FALSE}
+rex <- function(mx, age){
+  sum(cumprod(1 - mx[(age+1):length(mx)]))
+}
+```
+
+```{r, echo = FALSE}
+life_expectancy_table = function(lt)
+{
+  lt %>%
+    select(Country, Gender,Year, Age, mx) %>%
+    group_by(Year, Country, Gender) %>%
+    summarise(mx_list = list(mx))%>%
+    inner_join(lt[c("Age","Country","Gender","Year")],c("Year", "Gender","Country"))%>%
+    group_by(Year, Country, Gender, Age) %>%
+    summarise(ex = rex(unlist(mx_list),Age))%>%
+    arrange(Country, Gender) -> lt
+  return (lt)
+}
+df_ex_for_all_age = life_expectancy_table(df)
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4}
+ages = c(60,65)
+p<-ggplot(mapping=aes(x=Year, y=ex, linetype=forcats::as_factor(Age))) +
+  geom_smooth(method="loess",
+              se=FALSE,
+              span=0.2,
+              size=.5) +
+  scale_color_brewer() +
+  labs(linetype="Age") +
+  ylab("Espérance de vie")+
+  ggtitle("Espérance de vie pour les personnes âgées.")+
+  facet_wrap(vars(Gender,Country))+
+  theme_bw()
+p%+%
+  filter(df_ex_for_all_age, Age %in% ages, Country %in% c("Spain","USA"))
+```
+
+- Nous constatons que l'espérance de vie chez les personnes âgées ($60,65$ ans) ont progressivement augmenté du siècle précédent jusqu'à présent, par exemple : une femme espagnole qui pouvait espérer de vivre encore 12 ans en 1900, peut en 2000, espérer deux fois plus longtemps soit près de 24 ans.
+
+# Applications de méthodes factorielles sur données
+
+## PCA et SVD sur les tables de log-mortalité
+
+L'analyse des composantes principales (ACP , i.e PCA) est une technique de réduction de dimensions. Notre table de données df_pivot comporte un grand nombre de variables $X_0, ... , X_{109}$ dont certaines sont corrélées. Cette corrélation entre les variables entraîne une redondance de l'information au sein de nos données. Etant que nous avons 110 variables,nous ne pouvons pas obtenir une bonne visualsation en raison du grand nombre de dimensions.Nous utilisons une PCA pour transformer les variables originales $X_0, ... , X_{109}$ en une combinaison linéaire de ces variables qui sont indépendante. A l'issue de cette réduction de dimension, il est dorénavant possible de représenter dans un graphique à deux dimensions, les variables originales par rapport aux nouvelles variables (les axes de notre graphique).
+
+Exemple d'utilisation de PCA : Hommes - Espagne. 
+
+```{r, echo = FALSE}
+library(tidyverse)
+library(broom)
+years = c(1948:2010)
+extract_data_pca = function(lt,ref_country,ref_gender,years)
+{
+  lt%>%
+    filter(Country == ref_country, Gender == ref_gender, Year %in% years) -> lt
+  data.frame(lt[,1],apply(lt[,-c(1,2,3)],MARGIN = 2,FUN = log)) -> lt
+  return(lt)
+}
+lt_pca = extract_data_pca(df_pivot,"Spain","M",years)
+pca = prcomp(lt_pca,scale = TRUE)
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4.5}
+# Screeplot - V2
+screeplot(pca, type = "l", npcs = 15, main = "Screeplot")
+abline(h = 1, col="red", lty=5)
+legend("topright", legend=c("Eigenvalue = 1"),
+       col=c("red"), lty=5, cex=0.6)
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4.5}
+# Cumulative variance plot 
+cumpro <- cumsum(pca$sdev^2 / sum(pca$sdev^2))
+plot(cumpro[0:15], xlab = "Principal Components", ylab = "Amount of explained variance", main = "Cumulative variance plot")
+abline(v = 4, col="blue", lty=5)
+abline(h = 0.970, col="blue", lty=5)
+legend("topleft", legend=c("Cut-off at PC4"),
+       col=c("blue"), lty=5, cex=0.6)
+```
+
+Le screeplot nous montre la quantité de variation que chaque composante principale capture à partir des données. 
+
+La règle de Kaiser (on ne considère que les axes associés à une valeur propre strictement supérieure à 1) nous assure que nous devons garder les quatre premières composantes principales afin de garder un maximum d’inertie (information) pour un nombre minimale de composantes.
+
+Choisir les quatre premières composantes principales (Cut-off à PCA 4) permet d'expliquer 96% des variations initiales.
+
+Le screeplot est une courbe raide qui se courbe rapidement puis s'aplatit au point de "Cut-off".
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+#Corcicle
+COR = cor(lt_pca,pca$x[,1:2])
+s.corcircle(COR)
+```
+
+Ce graphique représente les corrélations entre les variables âges $X_{0} ,..., X_{109}$. Il montre les relations entre toutes ces variables. 
+
+Nous notons que les vecteurs $X_{0}$ à $X_{90}$ ont la même direction. Ces vecteurs représentant les variables d’âge sont corrélés positivement. L’angle entre deux flèches dans ce groupe de vecteurs est très petit, ce qui montre que ces variables sont très positivement corrélées.
+
+Les vecteurs $X_{91}$ à $X_{109}$ ont la même direction. Montrant qu’il y a une corrélation entre ces variables. Cependant, l’angle entre deux flèches dans ce groupe de vecteurs n’est pas assez petit pour dire qu’ils sont très positivement corrélés comme avant.
+
+Notons que les vecteurs $X_{105}$ et $X_{60}$ sont perpendiculaires, les variables sont non corrélées (indépendantes).
+
+Nous constatons que les vecteurs $X_{109}$ et $X_{24}$ divergent l'un de l'autre et forment un angle de $180°$. Ces vecteurs sont corrélés négativement.
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4.5}
+#Biplot
+augment(pca, data = lt_pca)%>%
+  ggplot(aes(.fittedPC1, .fittedPC2)) +
+  geom_point() +
+  geom_text(aes(label = Year))+
+  xlab("PCA1")+
+  ylab("PCA2")+
+  ggtitle("Biplot")+
+  theme_bw()
+```
+
+Le biplot consiste simplement à fusionner le cercle de corrélation avec le graphique des individus (représentant le positionnement des années par rapport aux composantes principales).
+
+Nous préférons représenter les deux graphiques séparément, par défaut de la lisibilité. Néanmoins, une analyse pertinente est possible : 
+
+Les facteurs les plus importants pour PC2 sont $X_{99}$ à $X_{109}$. Leurs effets vont dans la même direction.
+Ces variables, formant un cluster d’âge élevé, tendent à nous faire comprendre qu’un taux de mortalité à ces âges est associé aux années $1980$ à $2010$.
+
+De nombreux facteurs contribuent à PC1, dont $X_{0}$ à $X_{90}$ et leurs effets vont également dans la même direction.
+Ces facteurs, formant une cluster d’âge, tendent à nous faire comprendre qu’un taux de mortalité a ces âges est associé pour les années $1950$ à $1980$.
+
+## Analyse correspondance canonique
+
+
+```{r, echo = FALSE, results = "hide"}
+library(vegan)
+extract_data_cca = function(lt,ref_country,ref_gender,years)
+{
+  lt%>%
+    filter(Country == ref_country, Gender == ref_gender, Year %in% years) -> mat
+  mat = as.data.frame(mat)
+  mat %>% remove_rownames %>% column_to_rownames(var="Year") -> mat
+  mat = mat[,-c(1,2,3)]
+  return(mat)
+}
+spain_f_cca = extract_data_cca(df_pivot,"Spain", "F", c(1948:1998))
+usa_f_cca = extract_data_cca(df_pivot,"USA", "F", c(1948:1998))
+ccamodel = cca(spain_f_cca~.,usa_f_cca)
+finalmodel<- ordistep(ccamodel, scope=formula(ccamodel))
+finalmodel
+```
+
+
+```{r}
+plot(finalmodel, xlim=c(-1.5,2), ylim=c(-1,1.5),display=c("sp","cn","wa"),main="CCA")
+```
+
+Interpretation :
+
+- Les longueurs et positions des flèches fournissent des informations sur la relation entre les variables d'âges et les axes. Les flèches parallèles à un axe (par exemple la variable '16' et l'axe CCA1) indiquent une corrélation, la longueur de la flèche nous indique la force de cette corrélation.  Ainsi, l'ensemble de nos variables âges $1,...,109$ sont fortement liées à l'axe CCA1 mais aucun de ces éléments n'est lié à l'axe CCA2.
+
+- L'axe CCA1 est associé à l'ensemble de ces variables d'âges, cependant puisque la corrélation entre ces variables et l'axe CCA1 est négative, les scores élevés positifs sur l'axe CCA1 devraient avoir de faible valeurs pour la variable '16', tandis que les scores élevés négatifs sur l'axe CCA1 devraient avoir une très forte corrélation avec nos variables de départ.
+
+- Ainsi, nous nous attendrions à ce que l'ensemble croix rouges soient fortement corrélés à ces variables tandis que la moitié des points blancs ait peu de relations avec ces variables.
+
+# Modèle de Lee-Carter et ses limites
+
+## Présentation du modèle 
+
+Au cours du siècle dernier, aux États-Unis et en Europe occidentale, les quotients de mortalité à tous les âges ont affiché une tendance générale à la baisse comme nous l'avons pu constaté précédement.
+Cette tendance à la baisse n'a pas toujours été homogène d'un âge à l'autre.
+
+Le modèle Lee-Carter a été conçu pour modéliser et prévoir l'évolution des log-quotients de mortalité aux États-Unis au cours du XXe siècle.
+
+Soit $log(m_{x, t})$ le log-quotient de mortalité à l'âge $x$ au cours de l'année $t \in T$ pour une population donnée (définie par le sexe et le pays).
+
+Le modèle de Lee-Carter suppose que les log-quotient de mortalité observés sont échantillonnés selon le modèle suivant
+
+\[
+log(m_{x,t}) \sim_{\text{indépendant}} a_x + b_x \kappa_t + \epsilon_{x,t}
+\]
+où $(a_x)_x, (b_x)_x$ et $(\kappa_t)_t$ sont des vecteurs inconnus avec : 
+\[
+a_x = \frac{1}{|T|}\sum_{t \in T} log(m_{x,t})\qquad \sum_{t\in T} \kappa_t = 0 \qquad \sum_{x} b_x^2 =1
+\]
+et $\epsilon_{x,t}$ des variables aléatoires gaussiennes i.i.d.
+
+Le paramètre $(a_x)_x$ s'interprète comme la valeur moyenne des $log(m_{x,t})$ au cours du temps.
+
+Le paramètre $(b_x)_x$ traduit la sensibilité de la mortalité instantanée à l'âge $x$ par rapport à l'évolution générale de l'indice de mortalité $k_t$.
+
+$\epsilon_{x,t}$ sont les termes d'erreurs qui reflètent les influences historique résiduelle spécifique à l'âge non captées par le modèle.
+
+On obtient les paramètres par un critère de moindres carrés :
+
+$$\newcommand{\form}((\hat{a}_{x},\hat{b}_{x},\hat{k}_{t})=argmin \sum_{x,t}(ln (m_{x}) - a_x - b_xk_{t})^2$$
+
+Cette estimation des moindres carrées nous donne la plus petite valeur pour la somme des erreurs au carré. Pour trouver ces coefficients (s'appelant la phase de "fitting" ou d'apprentissage du modèle) les auteurs emploient une décomposition en valeurs singulières (i.e SVD) pour trouver la solution à ce problème de minimisation.
+
+Considérons la matrice Z de dimension (111,n-d) où d et n sont respectivement les dates de début (d) et date de fin (n) de colonne la Year pour un pays donné : 
+
+$$\newcommand{\form}(Z = (log(m_{x,t})-\hat{a}_x)_{x,t})$$
+
+En appliquant une SVD à la matrice Z, on obtient la décomposition suivante :
+
+
+$$\newcommand{\form}( SVD(Z) = PDQ$$
+
+$$\newcommand{\form}(SVD(Z) = D_1P_{x1}Q_{t1} + D_2P_{x2}Q_{t2} + ... + D_{w}P_{x_w}Q_{t_w}$$
+
+
+où rank(Z) = w , $D_i$ où $i = 1, ... , w$ correspond aux valeurs singulières classées par ordre décroissant, $P_{x_i}$ et $Q_{t,i}$ où $i = 1, ... , w$ correspondant conformément aux vecteurs singuliers gauche et droit.
+
+Dans le cas du modèle de Lee-Carter, les auteurs effectuent une approximation pour les premiers termes, en considérant les termes suivants : 
+
+$$\newcommand{\form}(\hat{b}_x = P_{x_1}$$
+$$\newcommand{\form}(\hat{k}_x = D_{1}Q_{t_1}$$
+L'une des propriétés remarquables du modèle de Lee-Carter est qu'après cette phase de "fitting" (c'est-à-dire une fois que les valeurs de $a_x$, $b_x$ et $k_t$ sont calculées), l'étape de "forecasting" des quotients de mortalité se réduit à prédire l'indice de mortalité $k_t$ comme nous le verrons dans la suite.
+
+## Limites & Ouverture
+
+L'une des principales limite à ce modèle est que les termes d'erreurs sont supposées être homoscédastique et de distribution normale. En d'autres termes, cela revient à dire que : $$\newcommand{\Var}{\operatorname{Var}} \Var[\epsilon_{x,t}] = \sigma_i \forall i $$
+
+Cette hypothèse est irréaliste pour modéliser la mortalité humaine. Les log-quotients de mortalité observés sont beaucoup plus variable aux personnes âgés qu'aux âges plus jeunes. La   variance des taux de décès croit aux âges plus élevées, du fait notamment de la baisse des effectifs des survivants.
+
+Le critère de sélection des paramètres optimaux n'a pas de justification probabiliste. Nous nous sommes poser les questions suivantes : peux-on estimer les paramètres autrement ? Est-ce une bonne ou mauvaise idée ? Si oui, de quelle manière ?. 
+Chercher à modéliser l'approche pour obtenir un critère de détermination des paramètres grâce à des méthodes de type "maximum de vraisemblance" peut-être intéressant (cet estimateur existe-il ? peut-on le calculer ? si oui, le calculer et voir que ce n'est pas une bonne idée.).
+En effet, nous pourrions bénéficier de bonnes propriétés de cette classe d'estimateur (convergence, efficacité asymptotique, normalité asymptotique etc ..).
+
+# Application du modèle de Lee-Carter sur nos données 
+
+Dans cette partie, on s'intéresse à l'application du modèle Lee-Carter pour prédire les quotients de mortalité et les espérances de vie de tous les âges.
+  
+Lee et Carter suppose que $log(m_{x,t}) = a_{x} + b_{x}k_{t} + e_{x,t}$ ce qui est équivaut à dire que $m_{x,t} = exp(a_{x} + b_{x}k_{t} + e_{x,t})$. Pour simplifier, comme $e_{x,t}$ est le terme d'erreurs qui a un impact négligeable sur la valeur de $m_{x,t}$ et est difficile à prédire, on suppose que : $m_{x,t} = exp(a_{x} + b_{x}k_{t})$.
+Pour ce fait, nous utilisons les données historiques, disponibles pour calculer les coefficients $a_{x}$, $b_{x}$ et $k_{t}$ où $x$ correspond à l'âge et $t$ correspond à l'année.
+
+Dans un premier temps, nous allons travailler avec les données américaines. Nous allons entraîner notre modèle avec les données historiques de 1933 à 1995 et essayer de prédire les quotients de mortalité des États-Unis pour les années $2000$, $2005$ , ...,$2015$. Ensuite, nous allons comparer les prédictions avec les observations réelles pour vérifier la validation du modèle.
+  
+Comme $a_{x}$ et $b_{x}$ sont des variables indépendantes du temps, nous pouvons facilement les calculer avec les données historiques (cf la partie précédente - critère de moindres carrés - SVD) et les réutiliser pour la prédiction. Or $k_{t}$ est une variable dépendante du temps. Ainsi, il faut une méthode pour estimer ces variables afin de pouvoir réaliser une prédiction des quotients de mortalité.
+  
+Appelons $k$ une fonction de $\mathbb{N}$ dans $\mathbb{R}$ qui prends une année $t$ en argument et donne la valeur $k_t$. On peut simuler k par un processus stochastique, comme une marche aléatoire. On a ainsi $k_t = k_{t-1} + d + e_{t}$ avec $d$ = $\frac{k_{LastYear}-k_{FirstYear}}{LastYear-FirstYear}$ étant le "drift" et $e_t$ le terme d'erreur suivant une loi normale de paramètre $(0,\nu)$ avec $\nu$ la moyenne des variances des $k_{t\_obs}$.
+
+
+```{r, echo = FALSE}
+df_lc = df %>%
+  select(Year,Age,Gender,Country,mx)
+k_forcaster = function(k,year,last_training_year,drift,var){
+  res = tail(k,1)
+  for (i in (1:(year-last_training_year)))
+  {
+    res = res + drift + rnorm(1, 0, var) 
+  }
+  return (as.numeric(res))
+}
+lee_carter = function(df_lt,training_country,training_years,fitting_country,fitting_years, gender)
+{
+  lt <- df_lc %>%
+  filter(Country == training_country, Year %in% training_years, Gender == gender) %>%
+  select(Year, Age, Gender,Country, mx) %>%
+  tidyr::pivot_wider(names_from = "Age", values_from = "mx")
+  
+  data.frame(lt[,c(1,2,3)],apply(lt[,-c(1,2,3)],MARGIN = 2,FUN = log)) -> lt
+  M <- lt %>%
+  select(-c(Year,Gender,Country))
+  # The mean log-rate for each age group.
+  a <- colMeans(M)
+  # Subtract the average age pattern a from all years
+  for (j in 1:110)
+  {
+    M[,j] <- M[,j] - a[j]
+  }
+  # Compute SVD, M = U D V' where U and V' are orthogonal matrices and D is diagonal matrix of singular values. This vector models how to different age groups react to mortality change.
+  d <- svd(M, 1, 1)
+  # Lee and Carter normalize the first row of V so it sums to one and call it b.
+  b <- d$v/sum(d$v)
+  # Lee and Carter take the first column of U, multiply by D_1,1 and multiply by the sum of the first row of V' and call that k. This vector captures overall mortality change over time.
+  
+  k <- d$u * sum(d$v) * d$d[1]
+  
+  #k_data <- cbind(lt$Year,k) 
+  #k_data = as.data.frame(k)
+  #reg = lm(V2~V1,data = k)
+  #coef = reg$coefficients
+  #eq = paste("k = ",round(coef[2],1), "* t + ",round(coef[1],1))
+  #plot(k_data,ylab = "K", xlab="Year")
+  #abline(reg)
+  drift = (tail(k,1) - k[1])/length(k)
+  var_k = c()
+  for (i in (1:(length(k)-1)))
+  {
+    var_k = append(var_k,var(c(k[i],k[i+1])))
+  }
+  var_k = mean(var_k)
+  mx_lc = c()
+  for (i in fitting_years)
+  {
+    mx_lc = append(mx_lc,exp(a + b*k_forcaster(k,i,tail(training_years,1),drift,0.5)))
+  }
+  result <- filter(df_lc, Year %in% fitting_years, Country == fitting_country, Gender == gender) %>%
+  mutate(Year = factor(Year), mx_lc)
+  return(result)
+}
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+training_years = c(1933:1995)
+fitting_years = c(2000:2015)
+training_country = "USA"
+fitting_country = "USA"
+gender = "F"
+usa_lc_00_15 = lee_carter(df_lc,training_country,training_years,fitting_country,fitting_years,gender)
+# Plotting parameters and fits.
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+  legend.justification = c(1,0),
+  legend.position = c(1,0)
+)
+cols = c("c1" = "red", "c2" = "blue")
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = mx, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = mx_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend" ,breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Quotients de mortalité")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+```
+  
+En utilisant les prédictions de $k_t$ données par ce processus stochastique et les paramètres $a_x$ et $b_x$ obtenus grâce une estimation des moindres carrées, nous les utilisons dans la formule suivante $m_{x,t} = exp(a_{x} + b_{x}k_{t})$. Ainsi, nous pouvons calculer et prédire les quotients de mortalité pour les années à venir.
+
+Appliquons ce procédé aux données américaines (femmes). Notre phase de "fitting" i.e d'apprentissage concernera les années $1933, ...,1995$ afin de pouvoir faire du "forecasting" i.e des prédictions pour les années $2000, 2005, ..., 2015$. Nous comparerons les prédictions obtenues et les observations de ces années :
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+years = seq(2000,2015,by = 5)
+(p%+%
+  filter(usa_lc_00_15,Year %in% years)+
+  ggtitle(paste("Predictions of mortality quotient using Lee Carter model for",fitting_country,"trained by", training_country,"data")))
+```
+  
+  Nous constatons que le modèle de Lee-Carter donne des prédictions assez proches de la réalité, toutefois en sous-estimant le quotient de mortalité.
+  
+  Essayons maintenant d'utiliser les données américaines (Hommes) pour prédire les quotients de mortalité chez les hommes espagnols : 
+  
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+training_country = "USA"
+training_years = c(1933:1995)
+fitting_country = "Spain"
+fitting_years = c(2000:2015)
+years = seq(2000,2015,by = 5)
+gender = "M"
+spain_lc_00_15 = lee_carter(df_lc,training_country,training_years,fitting_country,fitting_years,gender)
+(p%+%
+  filter(spain_lc_00_15,Year %in% years)+
+  ggtitle(paste("Predictions of mortality quotient using Lee Carter model for",fitting_country,"trained by", training_country,"data")))
+```
+ 
+  Nous pouvons directement observer que le modèle marche moins bien pour l'Espagne que les Etat-Unis. En revanche, utilisant les données américaines pour prédire les quotients de mortalité espagnols ne semble pas très logique parce que chaque pays est différent des autres avec ses propres caractéristiques. Essayons maintenant d'utiliser les données espagnoles:
+  
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+training_country = "Spain"
+training_years = c(1933:1995)
+fitting_country = "Spain"
+fitting_years = c(2000:2015)
+years = seq(2000,2015,by = 5)
+gender = "M"
+spain_lc_00_15 = lee_carter(df_lc,training_country,training_years,fitting_country,fitting_years,gender)
+(p%+%
+  filter(spain_lc_00_15,Year %in% years)+
+  ggtitle(paste("Predictions of mortality of quotient using Lee Carter model for",fitting_country,"trained by", training_country,"data")))
+```
+ 
+  Nous constatons ainsi une prédiction très fiable et correspondante à la réalité, ce qui prouve la validité du modèle de Lee-Carter.
+  
+  Avec les quotients de mortalité prédits, nous pouvons faire une prédiction de l'espérance de vie comme ci-dessous:
+  
+```{r, echo = FALSE}
+life_expectancy_lc = function(lc)
+{
+  lc %>%
+    group_by(Year, Country, Gender) %>%
+    summarise(mx_list = list(mx_lc))%>%
+    inner_join(lc[c("Age","Country","Gender","Year")],c("Year", "Gender","Country"))%>%
+    group_by(Year, Country, Gender, Age) %>%
+    summarise(ex_lc = rex(unlist(mx_list),Age))%>%
+    arrange(Country, Gender) -> lc
+  
+  return (lc)
+}
+```
+
+```{r, echo = FALSE}
+life_expectancy_real = function(df,years,country,gender)
+{
+  df %>%
+    filter(Year %in% years, Country == country, Gender == gender)%>%
+    select(ex) -> result
+  return(as.matrix(result))
+}
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+)
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = ex, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = ex_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend",breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Life expectancy")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+years = c(2000:2015)
+country = "USA"
+gender = "F"
+lc_usa_ex = life_expectancy_lc(usa_lc_00_15) 
+lc_usa_ex$ex = life_expectancy_real(df,years,country,gender)
+years = seq(2000,2015,by = 5)
+(p%+%
+  filter(lc_usa_ex,Year %in% years)+
+  ggtitle(paste("Predictions of life expectancy using Lee Carter model for",country)))
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+years = c(2000:2015)
+country = "Spain"
+gender = "M"
+lc_spain_ex = life_expectancy_lc(spain_lc_00_15) 
+lc_spain_ex$ex = life_expectancy_real(df,years,country,gender)
+years = seq(2000,2015,by = 5)
+(p%+%
+  filter(lc_spain_ex,Year %in% years)+
+  ggtitle(paste("Predictions of life expectancy using Lee Carter model for",country)))
+```
+
+Nous constatons que le modèle Lee-Carter donne des prédictions fiables pour les jeunes (avant l'âge 60), pourtant pour les âges élevés (à partir de 60 ans), le modèle Lee-Carter semble un peu pessimiste, en sous-estimant les espérances de vie chez les personnes âgées.
+
+Une autre méthode pour estimer $k_t$, différente de la méthode précédente, est de faire une régression linéaire. En effet, $k_t$ est décroissante presque linéairement en fonction du temps. Cette décroissance linéaire de k est à la base de la méthode de Lee-Carter pour prévoir la mortalité. Nous pouvons appliquer une régression linéaire pour les données américaines de $1933$ à $1995$ (Femmes) comme ci-dessous: 
+
+```{r, echo = FALSE}
+df_lc = df %>%
+  select(Year,Age,Gender,Country,mx)
+lee_carter_reg = function(df_lt,training_country,training_years,fitting_country,fitting_years, gender,show)
+{
+  lt <- df_lc %>%
+  filter(Country == training_country, Year %in% training_years, Gender == gender) %>%
+  select(Year, Age, Gender,Country, mx) %>%
+  tidyr::pivot_wider(names_from = "Age", values_from = "mx")
+  
+  data.frame(lt[,c(1,2,3)],apply(lt[,-c(1,2,3)],MARGIN = 2,FUN = log)) -> lt
+  M <- lt %>%
+  select(-c(Year,Gender,Country))
+  # The mean log-rate for each age group.
+  a <- colMeans(M)
+  # Subtract the average age pattern a from all years
+  for (j in 1:110)
+  {
+    M[,j] <- M[,j] - a[j]
+  }
+  # Compute SVD, M = U D V' where U and V' are orthogonal matrices and D is diagonal matrix of singular values. This vector models how to different age groups react to mortality change.
+  d <- svd(M, 1, 1)
+  # Lee and Carter normalize the first row of V so it sums to one and call it b.
+  b <- d$v/sum(d$v)
+  # Lee and Carter take the first column of U, multiply by D_1,1 and multiply by the sum of the first row of V' and call that k. This vector captures overall mortality change over time.
+  
+  k <- d$u * sum(d$v) * d$d[1]
+  k <- cbind(lt$Year,k) 
+  k = as.data.frame(k)
+  reg = lm(V2~V1,data = k)
+  coef = reg$coefficients
+  if(show == TRUE)
+  {
+    eq = paste("k = ",round(coef[2],1), "* t + ",round(coef[1],1))
+    plot(k,ylab = "K", xlab="Year",main = eq)
+    abline(reg)    
+  }
+  mx_lc = c()
+  for (i in fitting_years)
+  {
+    mx_lc = append(mx_lc,exp(a + b*(coef[2]*i+coef[1])))
+  }
+  result <- filter(df_lc, Year %in% fitting_years, Country == fitting_country, Gender == gender) %>%
+  mutate(Year = factor(Year), mx_lc)
+  return(result)
+}
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4.5}
+training_years = c(1933:1995)
+fitting_years = c(2000:2015)
+training_country = "USA"
+fitting_country = "USA"
+gender = "F"
+usa_lc_reg_00_15 = lee_carter_reg(df_lc,training_country,training_years,fitting_country,fitting_years,gender,TRUE)
+# Plotting parameters and fits.
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+  legend.justification = c(1,0),
+  legend.position = c(1,0)
+)
+cols = c("c1" = "red", "c2" = "blue")
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = mx, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = mx_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend" ,breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Mortality quotient")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+```
+
+En utilisant les prédictions de $k_t$ données par la régression linéaire et les paramètres $a_x$ et $b_x$ obtenus grâce une estimation des moindres carrées. Nous pouvons les utiliser dans la formule suivante $m_{x,t} = exp(a_{x} + b_{x}k_{t})$. Ainsi, nous pouvons calculer et prédire les quotients de mortalité pour les années à venir. Nous obtenons ainsi les prédictions suivantes:
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+(p%+%
+  filter(usa_lc_reg_00_15,Year %in% years)+
+  ggtitle(paste("Predictions of mortality quotient using Lee Carter model for",fitting_country,"trained by", training_country,"data")))
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+)
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = ex, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = ex_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend",breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Life expectancy")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+years = c(2000:2015)
+country = "USA"
+gender = "F"
+lc_reg_usa_ex = life_expectancy_lc(usa_lc_reg_00_15) 
+lc_reg_usa_ex$ex = life_expectancy_real(df,years,country,gender)
+years = seq(2000,2015,by = 5)
+(p%+%
+  filter(lc_reg_usa_ex,Year %in% years)+
+  ggtitle(paste("Predictions of life expectancy using Lee Carter model for",country)))
+```
+
+A titre de remarque, nous avons pu constaté que le modèle de Lee-Carter avec une régression linéaire fonctionne aussi bien que celui présenté précédement. Il donne toujours des prédictions fiables des quotients de mortalité et des espérances de vie.
+
+Nous pouvons maintenant essayer de voir si le déclin de k est linéaire pour autre pays ou s'il est le cas seulement pour les Etats-Unis. Appliquons une régression linéaire pour les $k_t$ de l'Espagne entre $1900$ et $1995$ (Femmes):
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=4.5}
+training_years = c(1900:1995)
+fitting_years = c(2000:2015)
+training_country = "Spain"
+fitting_country = "Spain"
+gender = "F"
+spain_lc_reg_00_15 = lee_carter_reg(df_lc,training_country,training_years,fitting_country,fitting_years,gender,TRUE)
+# Plotting parameters and fits.
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+  legend.justification = c(1,0),
+  legend.position = c(1,0)
+)
+cols = c("c1" = "red", "c2" = "blue")
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = mx, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = mx_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend" ,breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Mortality quotient")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+```
+
+Nous constatons ici que la régression linéaire reste très valide pour les données espagnoles de $1900$ à $1995$. Nous observons aussi que la pente de $k_{Spain}$ est supérieure à celle de $k_{USA}$, cela a pour conséquent : les quotients de mortalité de l'Espagne vont diminuer plus rapide que ceux d'USA (nous avons constaté ce phénomène dans le graphique "Variation des quotients de mortalité entre Espagne et Etats-Unis") 
+
+Avec les prédictions de cette régression linéaire, nous pouvons espérer des prédictions fiables pour les années $2000$ à $2015$. Appliquons cela aux années $2000$ à $2015$ afin de valider notre hypothèses:
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+(p%+%
+  filter(spain_lc_reg_00_15,Year %in% years)+
+  ggtitle(paste("Predictions of mortality quotient using Lee Carter model for",fitting_country,"trained by", training_country,"data")))
+```
+
+```{r, echo = FALSE, results="markup",fig.width=8, fig.height=3}
+ptheme = theme(
+  panel.background = element_rect(fill = "white"),
+  panel.border = element_rect(fill = NA, colour = "black",size = 0.25),
+  panel.grid.major = element_line(colour = "grey83",size = 0.25),
+  panel.grid.minor = element_line(colour = "grey83",size = 0.25),
+)
+p<- ggplot(mapping=aes(x = Age)) + 
+  geom_point(aes(y = ex, color = "c1"),size = 0.3, alpha= .7) + 
+  geom_point(aes(y = ex_lc, color = "c2"),size = 0.3, alpha= .7) + 
+  scale_color_manual(name = "Legend",breaks= c("c1","c2"),values = cols, labels = c("Observation","Prediction"))+
+  ylab("Life expectancy")+
+  facet_wrap(~Year)+
+  scale_y_log10()+
+  ptheme+
+  theme_bw()
+years = c(2000:2015)
+country = "Spain"
+gender = "F"
+lc_reg_spain_ex = life_expectancy_lc(spain_lc_reg_00_15) 
+lc_reg_spain_ex$ex = life_expectancy_real(df,years,country,gender)
+years = seq(2000,2015,by = 5)
+(p%+%
+  filter(lc_reg_spain_ex,Year %in% years)+
+  ggtitle(paste("Predictions of life expectancy using Lee Carter model for",country)))
+```
+
+Nous constatons finalement une prédiction très fiable pour les femmes espagnoles avec le modèle Lee-Carter-Régression linéaire.
